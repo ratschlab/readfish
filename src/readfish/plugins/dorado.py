@@ -72,12 +72,13 @@ class Caller(CallerABC):
                 self.run_information.software_versions.guppy_connected_version
             )
 
-            if parse_version(self.guppy_version) >= parse_version("7.3.9"):
-                logging.info(f"Connected to caller version {self.guppy_version}.")
-            else:
-                logging.info(
-                    f"Trying to use minKNOW with a caller version {self.guppy_version}. If this is causing readfish to crash, try using a version of Dorado >= 7.3.9. You should also check for any updates available to readfish."
-                )
+            if os.getenv('MINKNOW_SIMULATOR', None) is None:
+                if parse_version(self.guppy_version) >= parse_version("7.3.9"):
+                    logging.info(f"Connected to caller version {self.guppy_version}.")
+                else:
+                    logging.info(
+                        f"Trying to use minKNOW with a caller version {self.guppy_version}. If this is causing readfish to crash, try using a version of Dorado >= 7.3.9. You should also check for any updates available to readfish."
+                    )
 
         # Set our own priority
         self.dorado_params = kwargs

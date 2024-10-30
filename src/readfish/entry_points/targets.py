@@ -84,6 +84,7 @@ This prevents trying to unblock reads of unknown length.
 from __future__ import annotations
 import argparse
 import logging
+import os
 import time
 from timeit import default_timer as timer
 from pathlib import Path
@@ -204,7 +205,10 @@ class Analysis:
         self.break_reads_after_seconds = (
             self.client.connection.analysis_configuration.get_analysis_configuration().read_detection.break_reads_after_seconds.value
         )
-        self.sample_rate = self.client.connection.device.get_sample_rate().sample_rate
+        if os.getenv('MINKNOW_SIMULATOR', None) == 'maxsim':
+            self.sample_rate = 4000
+        else:
+            self.sample_rate = self.client.connection.device.get_sample_rate().sample_rate
         self.logger.info("Run Configuration Received")
         self.logger.info(f"run_id={self.run_information.run_id}")
         self.logger.info(f"break_reads_after_seconds={self.break_reads_after_seconds}")
