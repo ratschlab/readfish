@@ -1,0 +1,5 @@
+attrs==23.2.0
+cattrs==23.2.3
+minknow_api==5.9.5
+readfish_summarise==0.2.5
+rtoml==0.10.0
