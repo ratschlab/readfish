@@ -126,8 +126,9 @@ dmypy.json
 
 # PyCharm
 .idea/
-*.toml
+#*.toml
 *.csv
+*.tsv
 
 # Other
 .DS_Store

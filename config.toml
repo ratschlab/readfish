@@ -1,0 +1,20 @@
+[caller_settings.dorado]
+config = "rna_rp4_130bps_sup"
+address = "ipc:///home/sayan/tmp/.guppy/5556"
+
+[mapper_settings.barcode]
+n_threads = 4
+
+[[regions]]
+name = "Barcodes Exist"
+min_chunks = 1
+max_chunks = 10
+
+# the following lines must not be changed
+targets = ["yes"]
+single_on = "stop_receiving"
+multi_on =  "stop_receiving"
+single_off = "unblock"
+multi_off = "unblock"
+no_seq = "proceed"
+no_map = "proceed"
