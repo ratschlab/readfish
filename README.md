@@ -1,3 +1,109 @@
+# Readfish for mapping barcodes
+
+## Quick Start
+
+### Setting up the environment
+
+This fork of readfish requires `minknow_api` version 5.9.5, and a basecaller client library which can be either 
+`pyguppy_client_lib` or `pybasecall_client_lib` depending on your guppy or dorado version. 
+The basecaller library version must match with the basecaller API version.
+Please make a note of the library you are using - this will be required later in the TOML files.
+
+If you already have the required libarires in some virtual environment, just activate it. 
+```bash
+source ~/.virtualenvs/Readfish/bin/activate   # change the path accordingly
+pip show minknow_api
+```
+Else create a new virtual environment and activate it.
+```bash
+python3 -m venv ~/.virtualenvs/Readfish
+source ~/.virtualenvs/Readfish/bin/activate
+```
+
+Now install the basecaller client library that works for you. 
+
+For example, if you have `guppy_basecall_server` version 6.5.7, run `pip install ont-pyguppy-client-lib==6.5.7`.
+
+If you have Dorado version 7.2.13, run `pip install ont-pyguppy-client-lib==7.2.13`.
+
+If you have Dorado version 7.3.0 or above, such as version 7.4.12, run `pip install ont-pybasecall-client-lib==7.4.12`
+
+### Downloading and installing Readfish
+
+Clone the Github repository and install
+```bash
+git clone https://github.com/ratschlab/readfish.git
+cd readfish
+pip install -e .
+# run readfish to see it works
+readfish --version
+```
+
+### Configuring the toml file
+
+A sample config file `config.toml` is provided in the root directory of the repo.
+Most of the configuration options such as the basecaller settings remain exactly the same as those in the original readfish.
+
+However, unlike Readfish, this fork does not need any index. Instead, it has a list of barcodes that it looks for.
+So, the aligner settings do not need an index file. Here's how it looks -
+```toml
+[mapper_settings.barcode]
+n_threads = 4
+```
+
+The control region also remains unchanged -
+```toml
+[[regions]]
+name = "control"
+control = true
+min_chunks = 1 # minimum number of chunks before a decision can be made
+max_chunks = 1 # maximum number of chunks to use in decision making - after this perform the above_max_chunks action
+targets = []  # Genomic targets for this region
+single_on = "stop_receiving"  # Action to take if there is one mapping on target.
+multi_on = "stop_receiving"   # Action to take if there is more than one mapping, with at least one target.
+single_off = "stop_receiving"        # Action to take if there is one mapping and it is off target
+multi_off = "stop_receiving"         # Action to take if there are multiple mappings, where all are off target.
+no_seq = "stop_receiving"            # Action to take if there is no sequence information
+no_map = "stop_receiving"            # Action to take if there is no mapping information
+above_max_chunks = "stop_receiving"  # Action to take if the number of chunks received is above max_chunks
+below_min_chunks = "stop_receiving"  # Action to take if the number of chunks received is below min_chunks
+```
+
+However, the analysis region changes slightly.
+1. The mapper checks for the presence of barcodes and returns `yes` if they are found and `no` otherwise. 
+   Thus, the `targets` key must be either `"yes"` or `"no"`.
+2. If the barcodes are found, we let the sequencing continue and stop receiving chunks for it.
+3. If some or all of the barcodes are found, but, they are malformed, missing barcodes, missing linkers, etc., then the read is ejected
+4. If no barcodes are found yet, we proceed until we have seen the maximum number of chunks.
+
+The corresponding configuration is as follows:
+```toml
+[[regions]]
+name = "Analysis"
+min_chunks = 1
+max_chunks = 10
+targets = ["yes"]                # This can only be either "yes" or "no"
+single_on = "stop_receiving"     # Action to take if the barcodes were detected in the sequence
+multi_on = "stop_receiving"      # This will never be trigerred since the mapper returns a yes/no response
+single_off = "unblock"           # Action to take when some or all of the barcodes are detected but are malformed, missing, etc.
+multi_off = "unblock"            # Again, this will never be trigerred
+no_seq = "proceed"               # Read has not been basecalled
+no_map = "proceed"               # No barcodes have not been detected yet
+above_max_chunks = "unblock"     # Action to take if the number of chunks received is above max_chunks
+below_min_chunks = "proceed"     # Action to take if the number of chunks received is below min_chunks
+```
+
+### Running
+
+Run this fork of readfish exactly as you would the original readfish in targets mode.
+
+```bash
+readfish validate config.toml
+readfish targets --device MN00000 --experiment-name "detecting barcodes" --toml ./config.toml --log-file logs.log
+```
+
+## General readfish gudidelines
+
 <p align="center">
   <img src="https://github.com/LooseLab/readfish/blob/main/docs/_static/readfish_logo.jpg?raw=true">
 </p>

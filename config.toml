@@ -1,20 +1,35 @@
 [caller_settings.dorado]
 config = "rna_rp4_130bps_sup"
-address = "ipc:///home/sayan/tmp/.guppy/5556"
+address = "ipc:///tmp/.guppy/5555"
 
 [mapper_settings.barcode]
 n_threads = 4
 
 [[regions]]
-name = "Barcodes Exist"
+name = "Control"
+control = true
+min_chunks = 1 # minimum number of chunks before a decision can be made
+max_chunks = 1 # maximum number of chunks to use in decision-making - after this perform the above_max_chunks action
+targets = []   # Genomic targets for this region
+single_on = "stop_receiving"        # Action to take if there is one mapping on target.
+multi_on = "stop_receiving"         # Action to take if there is more than one mapping, with at least one target.
+single_off = "stop_receiving"       # Action to take if there is one mapping and it is off target
+multi_off = "stop_receiving"        # Action to take if there are multiple mappings, where all are off target.
+no_seq = "stop_receiving"           # Action to take if there is no sequence information
+no_map = "stop_receiving"           # Action to take if there is no mapping information
+above_max_chunks = "stop_receiving" # Action to take if the number of chunks received is above max_chunks
+below_min_chunks = "stop_receiving" # Action to take if the number of chunks received is below min_chunks
+
+[[regions]]
+name = "Analysis"
 min_chunks = 1
 max_chunks = 10
-
-# the following lines must not be changed
-targets = ["yes"]
-single_on = "stop_receiving"
-multi_on =  "stop_receiving"
-single_off = "unblock"
-multi_off = "unblock"
-no_seq = "proceed"
-no_map = "proceed"
+targets = ["yes"]                # This can only be either "yes" or "no"
+single_on = "stop_receiving"     # Action to take if the barcodes were detected in the sequence
+multi_on = "stop_receiving"      # This will never be trigerred since the mapper returns a yes/no response
+single_off = "unblock"           # Action to take when some or all of the barcodes are detected but are malformed, missing, etc.
+multi_off = "unblock"            # Again, this will never be trigerred
+no_seq = "proceed"               # Read has not been basecalled
+no_map = "proceed"               # No barcodes have not been detected yet
+above_max_chunks = "unblock"     # Action to take if the number of chunks received is above max_chunks
+below_min_chunks = "proceed"     # Action to take if the number of chunks received is below min_chunks
