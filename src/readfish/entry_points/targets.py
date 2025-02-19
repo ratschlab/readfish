@@ -83,6 +83,8 @@ This prevents trying to unblock reads of unknown length.
 # Core imports
 from __future__ import annotations
 import argparse
+import traceback
+from packaging.version import Version
 import logging
 import os
 import time
@@ -282,8 +284,10 @@ class Analysis:
                     self.live_toml, self.client.channel_count, self.logger
                 )
             # FIXME: Broad exception
-            except Exception:
-                pass
+            except Exception as e:
+                if hasattr(e, "exceptions"):
+                    self.logger.error(getattr(e, "exceptions"))
+                    self.logger.error(traceback.format_exc())
             last_toml_mtime = self.live_toml.stat().st_mtime
         return last_toml_mtime
 
@@ -407,17 +411,15 @@ class Analysis:
             action = Action.stop_receiving
 
         if action is Action.stop_receiving:
-            stop_receiving_action_list.append((result.channel, result.read_number))
+            stop_receiving_action_list.append((result.channel, result.read_id))
 
         elif action is Action.unblock:
             if self.dry_run:
                 # Log an 'unblock' action to previous action, but send a 'stop receiving' to prevent further read processing.
                 action_overridden = True
-                stop_receiving_action_list.append((result.channel, result.read_number))
+                stop_receiving_action_list.append((result.channel, result.read_id))
             else:
-                unblock_batch_action_list.append(
-                    (result.channel, result.read_number, result.read_id)
-                )
+                unblock_batch_action_list.append((result.channel, result.read_id))
 
         # If we have made a final decision for this read and we shouldn't see it again!
         if action is Action.unblock or action is Action.stop_receiving:
@@ -434,6 +436,7 @@ class Analysis:
                 )
 
         return (
+            action,
             previous_action,
             action_overridden,
             action.name if action_overridden else None,
@@ -451,6 +454,7 @@ class Analysis:
 
         last_live_toml_mtime = 0
         self.logger.info("Starting main loop")
+        self.logger.info("Generating aligner description, if possible...")
         mapper_description = self.mapper.describe(self.conf.regions, self.conf.barcodes)
         self.logger.info(mapper_description)
         send_message(self.client.connection, mapper_description, Severity.INFO)
@@ -498,9 +502,10 @@ class Analysis:
                 )
                 result.decision = make_decision(self.conf, result)
                 action = condition.get_action(result.decision)
-                seen_count = self.chunk_tracker.seen(result.channel, result.read_number)
+                seen_count = self.chunk_tracker.seen(result.channel, result.read_id)
                 #  Check if there any conditions that override the action chose, exceed_max_chunks etc...
                 (
+                    action,
                     previous_action,
                     action_overridden,
                     overridden_action_name,
@@ -518,7 +523,6 @@ class Analysis:
                     read_in_loop=number_reads,
                     read_id=result.read_id,
                     channel=result.channel,
-                    read_number=result.read_number,
                     seq_len=len(result.seq),
                     counter=seen_count,
                     mode=result.decision.name,
@@ -604,6 +608,13 @@ If there isn't a newer version of readfish and readfish is failing, please open 
     https://github.com/LooseLab/readfish/issues"""
         )
 
+    if minknow_version < Version("6.0.0"):
+        logger.critical(
+            f"This version of readfish ({__version__}) is not compatible with less than MinKNOW 6.X.X, you downgrade to at least readfish 2024.2.0"
+            f"This won't work, exiting..."
+        )
+        raise SystemExit(1)
+
     # Fetch sequencing device
     position = get_device(args.device, host=args.host, port=args.port)
 
@@ -614,6 +625,13 @@ If there isn't a newer version of readfish and readfish is failing, please open 
         filter_strands=True,
         cache_type=AccumulatingCache,
         timeout=args.wait_for_ready,
+        prefilter_classes={
+            "strand",
+            "strand2",
+            "short_strand",
+            "adapter",
+            "unknown_positive",
+        },
     )
 
     # Load TOML configuration
@@ -638,6 +656,13 @@ If there isn't a newer version of readfish and readfish is failing, please open 
         first_channel=1,
         last_channel=read_until_client.channel_count,
         max_unblock_read_length_seconds=args.max_unblock_read_length_seconds,
+        accepted_first_chunk_classifications=[
+            "strand",
+            "strand2",
+            "short_strand",
+            "adapter",
+            "unknown_positive",
+        ],
     )
 
     worker = Analysis(

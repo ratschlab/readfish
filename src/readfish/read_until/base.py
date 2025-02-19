@@ -138,7 +138,7 @@ class ReadUntilClient(object):
         self.prefilter_classes = prefilter_classes
 
         # Stores the most recent read number that a decision has been made on (stop_receiving/unblock)
-        self.channel_read_latest_decision = defaultdict(int)
+        self.channel_read_latest_decision = defaultdict(str)
 
         try:
             self.connection = Connection(
@@ -201,9 +201,13 @@ class ReadUntilClient(object):
             self.CacheType.__name__,
             filter_to,
         )
-
+        # When there is no run on, MinKNOW only returns a subset of read classifications, and our prefilter classes are not amongst them.
+        # This would then throw an uniformative KeyError. We now just carry on, and get to the point where we try to query about the run
+        # Which raises a more informative gRPC error instead.
+        # TODO - log the missing strands
         self.strand_classes = set(
-            self.lookup_read_class[x] for x in self.prefilter_classes
+            self.lookup_read_class.get(x, f"{x}_classification_unavailable")
+            for x in self.prefilter_classes
         )
 
         self.logger.debug("Strand-like classes are %s.", self.strand_classes)
@@ -274,7 +278,7 @@ class ReadUntilClient(object):
         #    requests before they are put on the gRPC stream.
         self.action_queue = queue.Queue()
 
-        self.channel_read_latest_decision = defaultdict(int)
+        self.channel_read_latest_decision = defaultdict(str)
 
         # the data_queue is used to store the latest chunk per channel
         self.data_queue = self.CacheType(size=self.cache_size)
@@ -349,7 +353,7 @@ class ReadUntilClient(object):
             data = [
                 (channel, read)
                 for (channel, read) in data
-                if read.number > self.channel_read_latest_decision[channel]
+                if read.id not in self.channel_read_latest_decision[channel]
             ]
         return data
 
@@ -571,10 +575,10 @@ class ReadUntilClient(object):
                         self.logger.debug(
                             "Rereceived %s:%s after stop request.",
                             read_channel,
-                            read.number,
+                            read.id,
                         )
                         continue
-                    self.stop_receiving_read(read_channel, read.number)
+                    self.stop_receiving_read(read_channel, read.id)
                 unique_reads.add(read.id)
                 read_samples_behind = progress.acquired - read.chunk_start_sample
                 samples_behind += read_samples_behind
@@ -608,7 +612,7 @@ class ReadUntilClient(object):
                 raw_data_bytes = 0
                 last_msg_time = now
 
-    def _generate_action(self, read_channel, read_number, action, **params):
+    def _generate_action(self, read_channel, read_id, action, **params):
         """Returns an action request to be placed on the queue
 
         :param read_channel: a read's channel number.
@@ -622,7 +626,7 @@ class ReadUntilClient(object):
         action_kwargs = {
             "action_id": action_id,
             "channel": read_channel,
-            "number": read_number,
+            "id": read_id,
         }
         self.sent_actions[action_id] = action
         if action == "stop_further_data":
@@ -641,7 +645,7 @@ class ReadUntilClient(object):
             "Action %s on channel %s, read %s: %s",
             action_id,
             read_channel,
-            read_number,
+            read_id,
             action,
         )
         return action_request

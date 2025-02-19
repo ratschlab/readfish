@@ -170,10 +170,10 @@ class _PluginModule:
         override=True, the builtin module names are ignored.
         """
         builtins = {
-            "guppy": "guppy",
             "dorado": "dorado",
             "mappy": "mappy",
             "mappy_rs": "mappy_rs",
+            "mappy-rs": "mappy_rs",
             "barcode": "barcode_aligner",
             "no_op": "_no_op",
         }
@@ -237,6 +237,7 @@ class Conf:
     :param channels: The number of channels on the flow cell
     :param caller_settings: The caller settings as listed in the TOML
     :param mapper_settings: The mapper settings as listed in the TOML
+    :param split_axis: The axis on which to split a flowcell if there are multiple regions. 0 is horizontal, 1 is vertical.
     :param regions: The regions as listed in the Toml file.
     :param barcodes: A Dictionary of barcode names to Barcode Classes
     :param _channel_map: A map of channels number (1 to flowcell size) to the index of the Region (in self.regions) they are part of.
@@ -245,6 +246,7 @@ class Conf:
     channels: int
     caller_settings: CallerSettings
     mapper_settings: MapperSettings
+    split_axis: int = 1
     regions: List[Region] = attrs.field(default=attrs.Factory(list))
     barcodes: Dict[str, Barcode] = attrs.field(default=attrs.Factory(dict))
     _channel_map: Dict[int, int] = attrs.field(
@@ -282,7 +284,9 @@ class Conf:
                 " with n_threads set to at least 4."
             )
 
-        split_channels = generate_flowcell(self.channels, len(self.regions) or 1)
+        split_channels = generate_flowcell(
+            self.channels, len(self.regions) or 1, axis=self.split_axis
+        )
         self._channel_map = {
             channel: pos
             for pos, (channels, region) in enumerate(zip(split_channels, self.regions))
@@ -466,7 +470,7 @@ class Conf:
             description.append(
                 f"""Region {region.name} (control={region.control}).
 Region applies to section of flow cell (# = applied, . = not applied):
-{draw_flowcell_split(self.channels, split, index=index)}"""
+{draw_flowcell_split(self.channels, split, index=index, axis=self.split_axis)}"""
             )
         return "\n".join(description)
 
