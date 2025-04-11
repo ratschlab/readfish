@@ -485,10 +485,17 @@ class Analysis:
             stop_receiving_action_list = []
 
             chunks = self.client.get_read_chunks(self.client.channel_count, last=True)
+            # print(" C.%d " % len(chunks), end='')
             calls = self.caller.basecall(
                 chunks, self.client.signal_dtype, self.client.calibration_values
             )
+            # n_calls = 0
+            # for _ in calls: n_calls += 1
+            # print(" B.%d " % n_calls, end='')
             aligns = self.mapper.map_reads(calls)
+            # n_aligns = 0
+            # for _ in aligns: n_aligns += 1
+            # print(" A.%d " % n_aligns, end='')
 
             #######################################################################
             for result in aligns:

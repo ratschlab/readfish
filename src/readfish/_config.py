@@ -175,6 +175,7 @@ class _PluginModule:
             "mappy_rs": "mappy_rs",
             "mappy-rs": "mappy_rs",
             "no_op": "_no_op",
+            "collinearity": "collinearity",
         }
         if self.name in builtins and not override:
             return importlib.import_module(f"readfish.plugins.{builtins[self.name]}")
