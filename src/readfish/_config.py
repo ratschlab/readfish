@@ -217,11 +217,30 @@ class CallerSettings(_PluginModule):
     """See :class:`_PluginModule` for details"""
 class MapperSettings(_PluginModule):
     """See :class:`_PluginModule` for details"""
-class Region(_Condition):
-    """See :class:`_Condition` for details"""
 class Barcode(_Condition):
     """See :class:`_Condition` for details"""
 # fmt: on
+
+
+@attrs.define
+class Region(_Condition):
+    """See :class:`_Condition` for details.
+
+    A region can bring its own plugins, which then replace the top-level
+    ``caller_settings``/``mapper_settings`` for its channels. As soon as one
+    region does, every non-control region runs in its own worker process with
+    its own caller and aligner (see :mod:`readfish._arms`), so that algorithms
+    can be compared side by side on one flow cell.
+
+    :param caller_settings: The caller for this region, defaults to the top-level one
+    :param mapper_settings: The aligner for this region, defaults to the top-level one
+    """
+
+    caller_settings: Optional[CallerSettings] = attrs.field(default=None)
+    mapper_settings: Optional[MapperSettings] = attrs.field(default=None)
+
+
+CHANNEL_ASSIGNMENTS = ("split", "modulo")
 
 
 @attrs.define
@@ -237,15 +256,21 @@ class Conf:
     :param caller_settings: The caller settings as listed in the TOML
     :param mapper_settings: The mapper settings as listed in the TOML
     :param split_axis: The axis on which to split a flowcell if there are multiple regions. 0 is horizontal, 1 is vertical.
+    :param channel_assignment: How channels are assigned to regions: ``split`` cuts the flow cell
+        into equal blocks along ``split_axis``, ``modulo`` assigns channel ``c`` to region
+        ``(c - 1) % len(regions)``, interleaving the regions over the whole flow cell.
     :param regions: The regions as listed in the Toml file.
     :param barcodes: A Dictionary of barcode names to Barcode Classes
     :param _channel_map: A map of channels number (1 to flowcell size) to the index of the Region (in self.regions) they are part of.
     """
 
     channels: int
-    caller_settings: CallerSettings
-    mapper_settings: MapperSettings
+    caller_settings: Optional[CallerSettings] = attrs.field(default=None)
+    mapper_settings: Optional[MapperSettings] = attrs.field(default=None)
     split_axis: int = 1
+    channel_assignment: str = attrs.field(
+        default="split", validator=attrs.validators.in_(CHANNEL_ASSIGNMENTS)
+    )
     regions: List[Region] = attrs.field(default=attrs.Factory(list))
     barcodes: Dict[str, Barcode] = attrs.field(default=attrs.Factory(dict))
     _channel_map: Dict[int, int] = attrs.field(
@@ -276,21 +301,80 @@ class Conf:
                     "or `barcodes` and cannot be used by readfish"
                 )
 
-        if self.mapper_settings.name == "mappy" and self.channels > 512:
+        # Every condition that makes decisions needs a caller and an aligner,
+        #   either its own (regions only) or the top-level ones
+        for name, (caller, mapper) in self.plugin_settings().items():
+            if caller is None or mapper is None:
+                raise RuntimeError(
+                    f"No caller_settings or mapper_settings for {name!r}: give them at the "
+                    "top level of the TOML or in the region"
+                )
+            if mapper.name == "mappy" and self.channels > 512:
+                raise RuntimeError(
+                    "We do not allow the use of the 'mappy' aligner with PromethION devices. "
+                    "Please use 'mapper_settings.mappy_rs' in your experiment TOML"
+                    " with n_threads set to at least 4."
+                )
+        if self.barcodes and self.parallel:
             raise RuntimeError(
-                "We do not allow the use of the 'mappy' aligner with PromethION devices. "
-                "Please use 'mapper_settings.mappy_rs' in your experiment TOML"
-                " with n_threads set to at least 4."
+                "Region-specific caller_settings/mapper_settings cannot be combined with barcodes"
             )
 
-        split_channels = generate_flowcell(
-            self.channels, len(self.regions) or 1, axis=self.split_axis
+        if self.channel_assignment == "modulo":
+            self._channel_map = (
+                {
+                    channel: (channel - 1) % len(self.regions)
+                    for channel in range(1, self.channels + 1)
+                }
+                if self.regions
+                else {}
+            )
+        else:
+            split_channels = generate_flowcell(
+                self.channels, len(self.regions) or 1, axis=self.split_axis
+            )
+            self._channel_map = {
+                channel: pos
+                for pos, (channels, region) in enumerate(
+                    zip(split_channels, self.regions)
+                )
+                for channel in channels
+            }
+
+    @property
+    def parallel(self) -> bool:
+        """True if any region has its own caller or aligner, in which case every
+        non-control region is run by its own worker process."""
+        return any(
+            r.caller_settings is not None or r.mapper_settings is not None
+            for r in self.regions
         )
-        self._channel_map = {
-            channel: pos
-            for pos, (channels, region) in enumerate(zip(split_channels, self.regions))
-            for channel in channels
+
+    def plugin_settings(
+        self,
+    ) -> Dict[str, Tuple[Optional[CallerSettings], Optional[MapperSettings]]]:
+        """The caller and aligner settings in effect for each condition that
+        makes decisions, by condition name.
+
+        Without region-specific plugins this is a single entry, ``"default"``,
+        for the top-level settings, which all conditions share (control regions
+        included, as their reads are still base-called and aligned for logging).
+        Otherwise there is one entry per non-control region.
+        """
+        if not self.parallel:
+            return {"default": (self.caller_settings, self.mapper_settings)}
+        return {
+            r.name: (
+                r.caller_settings or self.caller_settings,
+                r.mapper_settings or self.mapper_settings,
+            )
+            for r in self.regions
+            if not r.control
         }
+
+    def region_channels(self, index: int) -> List[int]:
+        """The channels assigned to the region ``self.regions[index]``."""
+        return sorted(c for c, i in self._channel_map.items() if i == index)
 
     def get_conditions(
         self, channel: int, barcode: Optional[str]
@@ -412,7 +496,15 @@ class Conf:
         d = cattrs.unstructure(self)
         # Pop dynamically added attributes
         d.pop("channels")
-        d.pop("_channel_map")
+        # cattrs versions differ in whether they unstructure the private
+        #   attribute under its name or its alias
+        d.pop("_channel_map", None)
+        d.pop("channel_map", None)
+        # Drop unset (None) plugin settings, TOML has no null
+        for table in [d] + d.get("regions", []):
+            for key in ("caller_settings", "mapper_settings"):
+                if table.get(key, ...) is None:
+                    table.pop(key)
         with open(path, "w") as fh:
             rtoml.dump(d, fh, pretty=True)
 
@@ -466,11 +558,21 @@ class Conf:
             description.append("")
 
         for index, region in enumerate(self.regions):
-            description.append(
-                f"""Region {region.name} (control={region.control}).
+            if self.channel_assignment == "modulo":
+                channels = self.region_channels(index)
+                description.append(
+                    f"""Region {region.name} (control={region.control}).
+Region applies to {len(channels)} channels, every {split}th starting at channel {channels[0] if channels else '-'} (channel_assignment = "modulo")."""
+                )
+            else:
+                description.append(f"""Region {region.name} (control={region.control}).
 Region applies to section of flow cell (# = applied, . = not applied):
-{draw_flowcell_split(self.channels, split, index=index, axis=self.split_axis)}"""
-            )
+{draw_flowcell_split(self.channels, split, index=index, axis=self.split_axis)}""")
+            if region.mapper_settings is not None or region.caller_settings is not None:
+                caller, mapper = self.plugin_settings()[region.name]
+                description.append(
+                    f"Region {region.name} runs its own worker: caller {caller.name}, aligner {mapper.name}."
+                )
         return "\n".join(description)
 
 

@@ -30,6 +30,15 @@ API Reference
 ----
 
 
+``readfish._arms`` module
+-------------------------
+
+.. automodule:: readfish._arms
+   :members: ArmManager, ArmSpec, arm_worker
+
+----
+
+
 ``readfish._loggers`` module
 ----------------------------
 

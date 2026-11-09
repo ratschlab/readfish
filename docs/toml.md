@@ -268,6 +268,63 @@ control = true
 ...
 ```
 
+### Interleaved regions
+
+`channel_assignment = "modulo"`, set at the top of the TOML like `split_axis`, assigns channel `c` to region `(c - 1) % N` of the `N` regions, in the order they are listed, instead of splitting the flow cell into blocks.
+The regions are then interleaved over the whole flow cell, so that position effects on the flow cell affect all of them alike.
+Any number of regions can be used.
+The default, `channel_assignment = "split"`, is the block layout described above.
+
+(parallel-regions)=
+### Comparing algorithms side by side
+
+A region can bring its own `caller_settings` and `mapper_settings`, which replace the top-level ones for its channels.
+As soon as one region does, every non-control region runs in its own worker process, with its own basecaller connection, aligner and decision state.
+This compares several selection algorithms on one flow cell: no region waits for the base-calling or alignment of another, so a slow aligner only delays decisions on its own channels.
+Regions without their own settings use the top-level ones, so the top-level tables are only needed if some region relies on them.
+
+```toml
+channel_assignment = "modulo"
+
+# shared by the regions that give no caller_settings
+[caller_settings.dorado]
+config = "dna_r10.4.1_e8.2_400bps_fast@v5.2.0||"
+address = "ipc:///tmp/.guppy/5555"
+
+[[regions]]
+name = "minimap2"
+targets = ["chr1"]
+...  # decisions as in any region
+mapper_settings.mappy_rs = { fn_idx_in = "ref.mmi", n_threads = 2 }
+
+[[regions]]
+name = "raw_signal_tool"
+targets = ["chr1"]
+...
+caller_settings.my_raw_caller = {}   # e.g. a tool that needs no base-calling
+mapper_settings.my_raw_mapper = { index = "ref.idx", threads = 2 }
+
+[[regions]]
+name = "control"
+control = true
+...
+```
+
+Every region keeps its own decisions (`targets`, `single_on`, ..., `min_chunks`, `max_chunks`), so the policy can be the same for all of them or differ.
+`readfish validate` initialises the caller and aligner of every region.
+
+The main process keeps the single Read Until connection: each iteration it forwards the newest chunk of every channel to the worker of the channel's region and sends the workers' actions to MinKNOW as they arrive.
+Reads in control regions are sequenced without being base-called, and logged with the decision `no_seq`.
+In addition to the usual files, every worker writes into the working directory:
+- `<run_id>_readfish_<region>.tsv`: the per-read debug log of the region (unless `--no-debug-log`)
+- `<run_id>_readfish_<region>_batches.tsv`: per batch the number of reads decided, the number of chunks forwarded (several chunks of a channel can arrive while the worker is busy, only the newest is used), the time the oldest of them waited for the worker (`wait_s`), and the time spent base-calling, aligning and deciding
+- `<run_id>_readfish_<region>.log`: the worker's log
+
+Notes:
+- Each worker loads its own index, so memory use adds up, and so do the aligners' threads: set them per region (e.g. `n_threads = 2`) so that their sum fits the machine next to MinKNOW and the basecaller.
+- Barcodes cannot be combined with region-specific plugins.
+- The live TOML (`<toml>_live`) is not reloaded, as the workers hold their own configuration.
+
 (regions-sub-tables)=
 ### Regions sub-tables
 

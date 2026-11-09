@@ -99,6 +99,7 @@ from minknow_api import protocol_service
 # Library
 from readfish._cli_args import DEVICE_BASE_ARGS, Chemistry
 from readfish._read_until_client import RUClient
+from readfish._arms import ArmManager
 from readfish._config import Action, Conf, make_decision, _Condition
 from readfish._statistics import ReadfishStatistics
 from readfish.__about__ import __version__
@@ -110,6 +111,7 @@ from readfish._compatibility import (
 )
 from readfish._utils import (
     get_device,
+    nice_join,
     send_message,
     ChunkTracker,
     Severity,
@@ -157,135 +159,15 @@ _cli = DEVICE_BASE_ARGS + (
 DISALLOWED_DUPLEX_DECISIONS = {Decision.first_read_override, Decision.duplex_override}
 
 
-class Analysis:
+class DecisionMaker:
     """
-    Analysis class where the read until magic happens. Comprises of one run
-    function that is run threaded in the run function at the base of this file.
-    Arguments listed in the __init__ docs.
+    Turns aligned reads into actions: the per-read decision logic shared by
+    :class:`Analysis` and the region workers of :mod:`readfish._arms`.
 
-    :param client: An instance of the ReadUntilClient object.
-    :param conf: An instance of the Conf object.
-    :param logger: The command level logger for this module.
-    :param debug_log: Whether to output the Debug Log. log Name is generated.
-    :param throttle: The time interval (seconds) between requests to the ReadUntilClient.
-    :param unblock_duration: Time, in seconds, to apply unblock voltage.
-    :param dry_run: If True unblocks are replaced with `stop_receiving` commands.
-    :param toml: The path to the toml file containing experiment conf. Used as the path for checking if the TOML needs reloading.
-    :param chemistry: Instance of Chemistry Enum, representing the chemistry of the run (Simplex/Duplex). Used for
-        decision making on strands that may be part of a duplex pair.
+    Expects the attributes ``conf``, ``logger``, ``chemistry``, ``dry_run``,
+    ``readfish_started_during_sequencing``, ``chunk_tracker``,
+    ``previous_action_tracker``, ``duplex_tracker`` and ``loop_statistics``.
     """
-
-    def __init__(
-        self,
-        client: ReadUntilClient,
-        conf: Conf,
-        logger: logging.Logger,
-        debug_log: bool,
-        throttle: float,
-        unblock_duration: float,
-        dry_run: bool,
-        toml: str,
-        chemistry: Chemistry,
-    ):
-        self.client = client
-        self.conf = conf
-        self.logger = logger
-        self.debug_log = debug_log
-        self.throttle = throttle
-        self.unblock_duration = unblock_duration
-        self.dry_run = dry_run
-        self.live_toml = Path(f"{toml}_live").resolve()
-        self.run_information = self.client.connection.protocol.get_run_info()
-        self.chemistry = chemistry
-        # Generate a run specific read log
-        read_log_name = (
-            f"{self.run_information.run_id}_readfish.tsv" if debug_log else None
-        )
-
-        self.logger.info("Fetching Run Configuration")
-        self.break_reads_after_seconds = (
-            self.client.connection.analysis_configuration.get_analysis_configuration().read_detection.break_reads_after_seconds.value
-        )
-        self.sample_rate = self.client.connection.device.get_sample_rate().sample_rate
-        self.logger.info("Run Configuration Received")
-        self.logger.info(f"run_id={self.run_information.run_id}")
-        self.logger.info(f"break_reads_after_seconds={self.break_reads_after_seconds}")
-        self.logger.info(f"sample_rate={self.sample_rate}")
-        # Create our statistics tracker
-        self.loop_statistics = ReadfishStatistics(
-            read_log_name, self.break_reads_after_seconds
-        )
-        logger.info("Initialising Caller")
-        self.caller: CallerABC = self.conf.caller_settings.load_object(
-            "Caller", run_information=self.run_information, sample_rate=self.sample_rate
-        )
-        logger.info("Caller initialised")
-        caller_description = self.caller.describe()
-        self.logger.info(caller_description)
-        send_message(self.client.connection, caller_description, Severity.INFO)
-        logger.info("Initialising Aligner")
-        self.mapper: AlignerABC = self.conf.mapper_settings.load_object("Aligner")
-        self.logger.info("Aligner initialised")
-        # count how often a read is seen
-        self.chunk_tracker = ChunkTracker(self.client.channel_count)
-
-        # This is an object to keep track of the last action sent to the client for each channel
-        self.previous_action_tracker = PreviouslySentActionTracker()
-        # Keep track of previous alignments
-        self.duplex_tracker = DuplexTracker()
-
-        # We assume that sequencing is already running.
-        # If the run is not in sequencing phase when the read until loop starts will
-        # be set to false and the first read seen can be unblocked.
-        self.readfish_started_during_sequencing = True
-
-        # This is a flag to prevent repeated logging of the same message
-        self.log_once_in_loop = True
-
-    @property
-    def wait_for_sequencing(self) -> bool:
-        """
-        Wait for minKNOW to report PHASE_SEQUENCING before starting readfish tight loop.
-        The check occurs in out RUClient wrapper.
-
-        :return: True if we are waiting for PHASE_SEQUENCING, False otherwise
-
-        """
-        if self.client.wait_for_sequencing_to_start:
-            if self.log_once_in_loop:
-                self.logger.info(
-                    f"MinKNOW is reporting {protocol_service.ProtocolPhase.Name(self.client.current_protocol_phase)}, waiting for PHASE_SEQUENCING to begin."
-                )
-                self.log_once_in_loop = not self.log_once_in_loop
-            self.readfish_started_during_sequencing = False  # We are not in sequencing phase, so we can unblock the first read we see as we will be sequencing it from the start
-            return True
-        return False
-
-    def reload_toml(self, last_toml_mtime: float) -> float:
-        """
-        Reload the toml to refresh the conf with any updates.
-        Reloading is determined by checking the modified time of the toml file.
-        If it is more recent, reload the conf.
-
-        :param last_live_mtime: The last modified time for the toml file.
-
-        :return: The last modified time for the toml file, updated if changed.
-        """
-        if (
-            self.live_toml.is_file()
-            and self.live_toml.stat().st_mtime > last_toml_mtime
-        ):
-            try:
-                self.conf = Conf.from_file(
-                    self.live_toml, self.client.channel_count, self.logger
-                )
-            # FIXME: Broad exception
-            except Exception as e:
-                if hasattr(e, "exceptions"):
-                    self.logger.error(getattr(e, "exceptions"))
-                    self.logger.error(traceback.format_exc())
-            last_toml_mtime = self.live_toml.stat().st_mtime
-        return last_toml_mtime
 
     def check_override_action(
         self,
@@ -438,6 +320,237 @@ class Analysis:
             action.name if action_overridden else None,
         )
 
+    def process_result(
+        self,
+        result: Result,
+        loop_counter: int,
+        read_in_loop: int,
+        stop_receiving_action_list: list[tuple[int, str]],
+        unblock_batch_action_list: list[tuple[int, str]],
+    ) -> None:
+        """Decide on one aligned read, queue its action and log it.
+
+        :param result: The base-called and aligned read
+        :param loop_counter: The iteration of the processing loop
+        :param read_in_loop: The number of this read within the iteration
+        :param stop_receiving_action_list: Appended to if the read is to be sequenced
+        :param unblock_batch_action_list: Appended to if the read is to be unblocked
+        """
+        control, condition = self.conf.get_conditions(result.channel, result.barcode)
+        result.decision = make_decision(self.conf, result)
+        action = condition.get_action(result.decision)
+        seen_count = self.chunk_tracker.seen(result.channel, result.read_id)
+        #  Check if there any conditions that override the action chose, exceed_max_chunks etc...
+        (
+            action,
+            previous_action,
+            action_overridden,
+            overridden_action_name,
+        ) = self.check_override_action(
+            control,
+            action,
+            result,
+            seen_count,
+            condition,
+            stop_receiving_action_list,
+            unblock_batch_action_list,
+        )
+        self.loop_statistics.log_read(
+            client_iteration=loop_counter,
+            read_in_loop=read_in_loop,
+            read_id=result.read_id,
+            channel=result.channel,
+            seq_len=len(result.seq),
+            counter=seen_count,
+            mode=result.decision.name,
+            decision=action.name,
+            condition=condition.name,
+            barcode=result.barcode,
+            previous_action=(
+                previous_action.name if previous_action is not None else previous_action
+            ),
+            action_overridden=action_overridden,
+            timestamp=time.time(),
+            # Anything below here is not included in the Debug log
+            region_name=(
+                _region.name
+                if (_region := self.conf.get_region(result.channel))
+                else "flowcell"
+            ),
+            overridden_action_name=overridden_action_name,
+        )
+
+
+class Analysis(DecisionMaker):
+    """
+    Analysis class where the read until magic happens. Comprises of one run
+    function that is run threaded in the run function at the base of this file.
+    Arguments listed in the __init__ docs.
+
+    :param client: An instance of the ReadUntilClient object.
+    :param conf: An instance of the Conf object.
+    :param logger: The command level logger for this module.
+    :param debug_log: Whether to output the Debug Log. log Name is generated.
+    :param throttle: The time interval (seconds) between requests to the ReadUntilClient.
+    :param unblock_duration: Time, in seconds, to apply unblock voltage.
+    :param dry_run: If True unblocks are replaced with `stop_receiving` commands.
+    :param toml: The path to the toml file containing experiment conf. Used as the path for checking if the TOML needs reloading.
+    :param chemistry: Instance of Chemistry Enum, representing the chemistry of the run (Simplex/Duplex). Used for
+        decision making on strands that may be part of a duplex pair.
+    :param padding: Target padding given on the command line, passed on to region workers.
+
+    If regions bring their own caller or aligner (``conf.parallel``), each non-control
+    region is run by a worker process (see :mod:`readfish._arms`) and this class only
+    distributes chunks, answers control regions and forwards the workers' actions.
+    """
+
+    def __init__(
+        self,
+        client: ReadUntilClient,
+        conf: Conf,
+        logger: logging.Logger,
+        debug_log: bool,
+        throttle: float,
+        unblock_duration: float,
+        dry_run: bool,
+        toml: str,
+        chemistry: Chemistry,
+        padding: int = 0,
+    ):
+        self.client = client
+        self.conf = conf
+        self.logger = logger
+        self.debug_log = debug_log
+        self.throttle = throttle
+        self.unblock_duration = unblock_duration
+        self.dry_run = dry_run
+        self.live_toml = Path(f"{toml}_live").resolve()
+        self.run_information = self.client.connection.protocol.get_run_info()
+        self.chemistry = chemistry
+        # Generate a run specific read log
+        read_log_name = (
+            f"{self.run_information.run_id}_readfish.tsv" if debug_log else None
+        )
+
+        self.logger.info("Fetching Run Configuration")
+        self.break_reads_after_seconds = (
+            self.client.connection.analysis_configuration.get_analysis_configuration().read_detection.break_reads_after_seconds.value
+        )
+        self.sample_rate = self.client.connection.device.get_sample_rate().sample_rate
+        self.logger.info("Run Configuration Received")
+        self.logger.info(f"run_id={self.run_information.run_id}")
+        self.logger.info(f"break_reads_after_seconds={self.break_reads_after_seconds}")
+        self.logger.info(f"sample_rate={self.sample_rate}")
+        # Create our statistics tracker
+        self.loop_statistics = ReadfishStatistics(
+            read_log_name, self.break_reads_after_seconds
+        )
+        self.arms: ArmManager | None = None
+        if self.conf.parallel:
+            logger.info(
+                "Starting one worker per region with its own caller and aligner"
+            )
+            self.arms = ArmManager(
+                self.client,
+                self.conf,
+                Path(toml).read_text(),
+                logger,
+                unblock_duration,
+                channels=self.client.channel_count,
+                padding=padding,
+                run_information=self.run_information.SerializeToString(),
+                sample_rate=self.sample_rate,
+                signal_dtype=self.client.signal_dtype,
+                calibration_values={
+                    ch: tuple(values)
+                    for ch, values in self.client.calibration_values.items()
+                },
+                dry_run=dry_run,
+                chemistry=chemistry.value,
+                run_id=self.run_information.run_id,
+                debug_log=debug_log,
+                break_reads_after_seconds=self.break_reads_after_seconds,
+            )
+            self.arms.start()
+            message = f"readfish started workers for regions {nice_join(self.arms.processes, conjunction='and')}"
+            self.logger.info(message)
+            send_message(self.client.connection, message, Severity.INFO)
+        else:
+            logger.info("Initialising Caller")
+            self.caller: CallerABC = self.conf.caller_settings.load_object(
+                "Caller",
+                run_information=self.run_information,
+                sample_rate=self.sample_rate,
+            )
+            logger.info("Caller initialised")
+            caller_description = self.caller.describe()
+            self.logger.info(caller_description)
+            send_message(self.client.connection, caller_description, Severity.INFO)
+            logger.info("Initialising Aligner")
+            self.mapper: AlignerABC = self.conf.mapper_settings.load_object("Aligner")
+            self.logger.info("Aligner initialised")
+        # count how often a read is seen
+        self.chunk_tracker = ChunkTracker(self.client.channel_count)
+
+        # This is an object to keep track of the last action sent to the client for each channel
+        self.previous_action_tracker = PreviouslySentActionTracker()
+        # Keep track of previous alignments
+        self.duplex_tracker = DuplexTracker()
+
+        # We assume that sequencing is already running.
+        # If the run is not in sequencing phase when the read until loop starts will
+        # be set to false and the first read seen can be unblocked.
+        self.readfish_started_during_sequencing = True
+
+        # This is a flag to prevent repeated logging of the same message
+        self.log_once_in_loop = True
+        self.log_once_live_toml = True
+
+    @property
+    def wait_for_sequencing(self) -> bool:
+        """
+        Wait for minKNOW to report PHASE_SEQUENCING before starting readfish tight loop.
+        The check occurs in out RUClient wrapper.
+
+        :return: True if we are waiting for PHASE_SEQUENCING, False otherwise
+
+        """
+        if self.client.wait_for_sequencing_to_start:
+            if self.log_once_in_loop:
+                self.logger.info(
+                    f"MinKNOW is reporting {protocol_service.ProtocolPhase.Name(self.client.current_protocol_phase)}, waiting for PHASE_SEQUENCING to begin."
+                )
+                self.log_once_in_loop = not self.log_once_in_loop
+            self.readfish_started_during_sequencing = False  # We are not in sequencing phase, so we can unblock the first read we see as we will be sequencing it from the start
+            return True
+        return False
+
+    def reload_toml(self, last_toml_mtime: float) -> float:
+        """
+        Reload the toml to refresh the conf with any updates.
+        Reloading is determined by checking the modified time of the toml file.
+        If it is more recent, reload the conf.
+
+        :param last_live_mtime: The last modified time for the toml file.
+
+        :return: The last modified time for the toml file, updated if changed.
+        """
+        if (
+            self.live_toml.is_file()
+            and self.live_toml.stat().st_mtime > last_toml_mtime
+        ):
+            try:
+                self.conf = Conf.from_file(
+                    self.live_toml, self.client.channel_count, self.logger
+                )
+            # FIXME: Broad exception
+            except Exception as e:
+                if hasattr(e, "exceptions"):
+                    self.logger.error(getattr(e, "exceptions"))
+                    self.logger.error(traceback.format_exc())
+            last_toml_mtime = self.live_toml.stat().st_mtime
+        return last_toml_mtime
+
     def run(self):
         """Run the read until loop, in one continuous while loop."""
 
@@ -450,11 +563,22 @@ class Analysis:
 
         last_live_toml_mtime = 0
         self.logger.info("Starting main loop")
-        self.logger.info("Generating aligner description, if possible...")
-        mapper_description = self.mapper.describe(self.conf.regions, self.conf.barcodes)
-        self.logger.info(mapper_description)
-        send_message(self.client.connection, mapper_description, Severity.INFO)
+        if self.arms is None:
+            self.logger.info("Generating aligner description, if possible...")
+            mapper_description = self.mapper.describe(
+                self.conf.regions, self.conf.barcodes
+            )
+            self.logger.info(mapper_description)
+            send_message(self.client.connection, mapper_description, Severity.INFO)
 
+        try:
+            self._loop(loop_counter, last_live_toml_mtime)
+        finally:
+            if self.arms is not None:
+                self.arms.stop()
+
+    def _loop(self, loop_counter: int, last_live_toml_mtime: float) -> None:
+        """The main loop of :meth:`run`."""
         while self.client.is_sequencing:
             t0 = timer()
             # Check if we have started readfish before PHASE_SEQUENCING,
@@ -468,6 +592,10 @@ class Analysis:
                 self.logger.info(
                     "readfish started in PHASE_SEQUENCING. Fully sequencing first read from each channel."
                 )
+            if self.arms is not None:
+                loop_counter += 1
+                self._dispatch_to_arms(t0, loop_counter)
+                continue
             if not self.mapper.initialised:
                 self.logger.warning(
                     "readfish main loop started but mapper is not initialised. Please check your aligners plugin documentation."
@@ -493,54 +621,13 @@ class Analysis:
             #######################################################################
             for result in aligns:
                 number_reads += 1
-                control, condition = self.conf.get_conditions(
-                    result.channel, result.barcode
-                )
-                result.decision = make_decision(self.conf, result)
-                action = condition.get_action(result.decision)
-                seen_count = self.chunk_tracker.seen(result.channel, result.read_id)
-                #  Check if there any conditions that override the action chose, exceed_max_chunks etc...
-                (
-                    action,
-                    previous_action,
-                    action_overridden,
-                    overridden_action_name,
-                ) = self.check_override_action(
-                    control,
-                    action,
+                self.process_result(
                     result,
-                    seen_count,
-                    condition,
+                    loop_counter,
+                    number_reads,
                     stop_receiving_action_list,
                     unblock_batch_action_list,
                 )
-                self.loop_statistics.log_read(
-                    client_iteration=loop_counter,
-                    read_in_loop=number_reads,
-                    read_id=result.read_id,
-                    channel=result.channel,
-                    seq_len=len(result.seq),
-                    counter=seen_count,
-                    mode=result.decision.name,
-                    decision=action.name,
-                    condition=condition.name,
-                    barcode=result.barcode,
-                    previous_action=(
-                        previous_action.name
-                        if previous_action is not None
-                        else previous_action
-                    ),
-                    action_overridden=action_overridden,
-                    timestamp=time.time(),
-                    # Anything below here is not included in the Debug log
-                    region_name=(
-                        _region.name
-                        if (_region := self.conf.get_region(result.channel))
-                        else "flowcell"
-                    ),
-                    overridden_action_name=overridden_action_name,
-                )
-
             #######################################################################
             # Compile actions to be sent
             self.client.unblock_read_batch(
@@ -564,9 +651,43 @@ class Analysis:
                 "Readfish client stopped.",
                 Severity.WARN,
             )
-            self.caller.disconnect()
-            self.mapper.disconnect()
+            if self.arms is None:
+                self.caller.disconnect()
+                self.mapper.disconnect()
             self.logger.info("Finished analysis of reads as client stopped.")
+
+    def _dispatch_to_arms(self, t0: float, loop_counter: int) -> None:
+        """One iteration of the main loop with region workers: forward the
+        chunks to the workers, and sequence the reads of control regions,
+        which are not base-called (logged as ``no_seq``). Actions of the
+        workers are sent by :class:`ArmManager` as they arrive.
+
+        The live TOML is not reloaded, as the workers hold their own configuration.
+        """
+        if self.live_toml.is_file() and self.log_once_live_toml:
+            self.logger.warning(
+                f"{self.live_toml} is ignored: the TOML cannot be reloaded when regions have their own plugins"
+            )
+            self.log_once_live_toml = False
+        chunks = self.client.get_read_chunks(self.client.channel_count, last=True)
+        control = self.arms.dispatch(chunks, self.readfish_started_during_sequencing)
+        stop_receiving_action_list, unblock_batch_action_list = [], []
+        for number_reads, (channel, read) in enumerate(control, start=1):
+            self.process_result(
+                Result(channel=channel, read_id=read.id, seq=""),
+                loop_counter,
+                number_reads,
+                stop_receiving_action_list,
+                unblock_batch_action_list,
+            )
+        self.client.stop_receiving_batch(stop_receiving_action_list)
+        t1 = timer()
+        if control:
+            self.loop_statistics.add_batch_performance(
+                number_of_reads=len(control), batch_time=t1 - t0
+            )
+        if t0 + self.throttle > t1:
+            time.sleep(self.throttle + t0 - t1)
 
 
 def run(
@@ -671,6 +792,7 @@ If there isn't a newer version of readfish and readfish is failing, please open 
         dry_run=args.dry_run,
         toml=args.toml,
         chemistry=Chemistry(args.chemistry),
+        padding=getattr(args, "padding", 0) or 0,
     )
 
     # begin readfish function

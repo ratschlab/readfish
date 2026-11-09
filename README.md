@@ -563,6 +563,11 @@ And for our Awesome Logo please checkout out [@tim_bassford](https://twitter.com
 <!-- start-changelog -->
 # Changelog
 
+## Unreleased (ratschlab fork)
+
+1. `channel_assignment = "modulo"` interleaves the regions over the flow cell, channel `c` going to region `(c - 1) % N`.
+2. Regions can have their own `caller_settings` and `mapper_settings`; each region then runs in its own worker process, so several selection algorithms can be compared on one flow cell without waiting for each other (see [Comparing algorithms side by side](https://looselab.github.io/readfish/toml.html#parallel-regions)).
+
 ## 26.1.0
 
 1. Removed Python 3.8 support

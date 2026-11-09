@@ -27,7 +27,6 @@ from readfish._config import Conf
 from readfish._cli_args import BASE_ARGS
 from readfish._utils import iter_exception_group
 
-
 _help = "Readfish TOML Validator"
 _cli = BASE_ARGS + (
     ("toml", dict(help="TOML file to validate")),
@@ -77,38 +76,44 @@ def run(parser, args, extras) -> int:
     if args.no_check_plugins:
         logger.info("Plugin initialisation and testing was skipped.")
     else:
-        logger.info("Initialising Caller")
-        try:
-            _ = conf.caller_settings.load_object("Caller")
-        except Exception as exc:
-            logger.error("Caller could not be initialised.")
-            logger.error(
-                "Possible reasons for this include a mismatch between the ont basecaller client and the version dorado you are connecting to."
-            )
-            logger.error(
-                "Additional information is available here: https://looselab.github.io/readfish/FAQ.html#connection-error-bad-reply-could-not-interpret-message-from-server-for-request-load-config-reply-invalid-protocol"
-            )
-            logger.error("See below for further details on this specific error.")
-            logger.error(str(exc))
-            errors += 1
-        else:
-            logger.info("Caller initialised")
+        aligners = {}
+        for name, (caller_settings, mapper_settings) in conf.plugin_settings().items():
+            label = "" if name == "default" else f" for region {name}"
+            logger.info(f"Initialising Caller{label}")
+            try:
+                _ = caller_settings.load_object("Caller")
+            except Exception as exc:
+                logger.error(f"Caller{label} could not be initialised.")
+                logger.error(
+                    "Possible reasons for this include a mismatch between the ont basecaller client and the version dorado you are connecting to."
+                )
+                logger.error(
+                    "Additional information is available here: https://looselab.github.io/readfish/FAQ.html#connection-error-bad-reply-could-not-interpret-message-from-server-for-request-load-config-reply-invalid-protocol"
+                )
+                logger.error("See below for further details on this specific error.")
+                logger.error(str(exc))
+                errors += 1
+            else:
+                logger.info(f"Caller{label} initialised")
 
-        logger.info("Initialising Aligner")
-        try:
-            al = conf.mapper_settings.load_object("Aligner")
-        except Exception as exc:
-            logger.error("Aligner could not be initialised, see below for details")
-            logger.error(str(exc))
-            errors += 1
-        else:
-            logger.info("Aligner initialised")
+            logger.info(f"Initialising Aligner{label}")
+            try:
+                aligners[name] = mapper_settings.load_object("Aligner")
+            except Exception as exc:
+                logger.error(
+                    f"Aligner{label} could not be initialised, see below for details"
+                )
+                logger.error(str(exc))
+                errors += 1
+            else:
+                logger.info(f"Aligner{label} initialised")
 
         if args.no_describe:
             logger.info("Skipping descriptions of Config and Plugins.")
         elif not errors:
             logger.info(conf.describe_experiment())
-            logger.info(al.describe(conf.regions, conf.barcodes))
+            for al in aligners.values():
+                logger.info(al.describe(conf.regions, conf.barcodes))
         else:
             logger.info("Skipping descriptions due to errors.")
 
