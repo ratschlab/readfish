@@ -44,7 +44,7 @@ import attrs
 import rtoml
 
 from readfish._config import Conf
-from readfish._loggers import setup_logger
+from readfish._loggers import flush_queued_logs, setup_logger
 
 # How long the main process waits for workers to load their plugins (seconds)
 STARTUP_TIMEOUT = 1800
@@ -124,30 +124,6 @@ def _newest_per_channel(messages: list) -> tuple[list, float, int]:
     return list(newest.items()), oldest, n
 
 
-def _flush_queued_logs(timeout: float = 10) -> None:
-    """Wait until the queues of all queue-backed loggers are written out.
-
-    :func:`readfish._loggers.setup_logger` writes files through a
-    ``QueueListener`` daemon thread that is never stopped, and a worker process
-    exits without running ``atexit`` handlers, so records still queued at exit
-    would be lost.
-    """
-    from logging.handlers import QueueHandler
-
-    queues = [
-        handler.queue
-        for logger in logging.Logger.manager.loggerDict.values()
-        if isinstance(logger, logging.Logger)
-        for handler in logger.handlers
-        if isinstance(handler, QueueHandler)
-    ]
-    deadline = time.time() + timeout
-    while any(not q.empty() for q in queues) and time.time() < deadline:
-        time.sleep(0.01)
-    # the listener writes the last record after taking it from the queue
-    time.sleep(0.05)
-
-
 def arm_worker(spec: ArmSpec, inbox: mp.Queue, outbox: mp.Queue) -> None:
     """Entry point of a worker process; see the module documentation.
 
@@ -214,7 +190,7 @@ def arm_worker(spec: ArmSpec, inbox: mp.Queue, outbox: mp.Queue) -> None:
         for plugin in (caller, mapper):
             if plugin is not None:
                 plugin.disconnect()
-        _flush_queued_logs()
+        flush_queued_logs()
         return
     outbox.put(("ready", spec.name, description))
 
@@ -295,7 +271,7 @@ def arm_worker(spec: ArmSpec, inbox: mp.Queue, outbox: mp.Queue) -> None:
         logger.info(summary)
         caller.disconnect()
         mapper.disconnect()
-        _flush_queued_logs()
+        flush_queued_logs()
         outbox.put(("stopped", spec.name, summary))
 
 

@@ -2,6 +2,7 @@
 
 Set as entrypoint in ``pyproject.toml``
 """
+
 from __future__ import annotations
 import sys
 import argparse
@@ -9,7 +10,7 @@ import importlib
 import logging
 
 from readfish.__about__ import __version__
-from readfish._loggers import setup_logger, print_args
+from readfish._loggers import flush_queued_logs, setup_logger, print_args
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -58,7 +59,11 @@ def main(argv: list[str] | None = None) -> None:
         )
         logger.info(" ".join(sys.argv) if argv is None else argv)
         print_args(args, printer=logger.info, exclude=["func"])
-        raise SystemExit(args.func(parser, args, extras))
+        try:
+            code = args.func(parser, args, extras)
+        finally:
+            flush_queued_logs()
+        raise SystemExit(code)
     else:
         parser.print_help()
 

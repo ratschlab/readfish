@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import time
 import argparse
 from logging.handlers import QueueHandler, QueueListener
 import queue
@@ -89,6 +90,27 @@ def setup_logger(
     logger.setLevel(level)
     logger.propagate = propagate
     return logger
+
+
+def flush_queued_logs(timeout: float = 10) -> None:
+    """Wait until the queues of all queue-backed loggers are written out.
+
+    :func:`setup_logger` writes files through a ``QueueListener`` daemon thread
+    that is never stopped, so records still queued when the process exits are
+    lost. Call this before exiting.
+    """
+    queues = [
+        handler.queue
+        for logger in logging.Logger.manager.loggerDict.values()
+        if isinstance(logger, logging.Logger)
+        for handler in logger.handlers
+        if isinstance(handler, QueueHandler)
+    ]
+    deadline = time.time() + timeout
+    while any(not q.empty() for q in queues) and time.time() < deadline:
+        time.sleep(0.01)
+    # the listener writes the last record after taking it from the queue
+    time.sleep(0.05)
 
 
 def print_args(

@@ -19,6 +19,8 @@ Example run command::
 
 import sys
 import logging
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup
@@ -54,6 +56,36 @@ _cli = BASE_ARGS + (
 )
 
 
+def _check_plugins(
+    toml: str, channels: int, name: str
+) -> tuple[str | None, str | None, str | None]:
+    """Initialise the caller and aligner of one condition.
+
+    :param toml: Path to the TOML file
+    :param channels: Number of channels on the flow cell
+    :param name: Key of the condition in :meth:`Conf.plugin_settings`
+    :return: The caller's error, the aligner's error, and the aligner's
+        description (None where there is none)
+    """
+    conf = Conf.from_file(toml, channels)
+    caller_settings, mapper_settings = conf.plugin_settings()[name]
+    caller_error = aligner_error = description = None
+    try:
+        _ = caller_settings.load_object("Caller")
+    except Exception as exc:
+        caller_error = str(exc)
+    try:
+        al = mapper_settings.load_object("Aligner")
+    except Exception as exc:
+        aligner_error = str(exc)
+    else:
+        try:
+            description = al.describe(conf.regions, conf.barcodes)
+        except Exception as exc:
+            description = f"Aligner description failed: {exc}"
+    return caller_error, aligner_error, description
+
+
 def run(parser, args, extras) -> int:
     """
     Runs the validate entry point
@@ -76,13 +108,23 @@ def run(parser, args, extras) -> int:
     if args.no_check_plugins:
         logger.info("Plugin initialisation and testing was skipped.")
     else:
-        aligners = {}
-        for name, (caller_settings, mapper_settings) in conf.plugin_settings().items():
+        descriptions = []
+        for name in conf.plugin_settings():
             label = "" if name == "default" else f" for region {name}"
-            logger.info(f"Initialising Caller{label}")
-            try:
-                _ = caller_settings.load_object("Caller")
-            except Exception as exc:
+            logger.info(f"Initialising Caller and Aligner{label}")
+            if conf.parallel:
+                # Each region runs in its own process during `readfish targets`,
+                #   so check it in one too: some plugins cannot share a process
+                with ProcessPoolExecutor(
+                    max_workers=1, mp_context=mp.get_context("spawn")
+                ) as pool:
+                    result = pool.submit(_check_plugins, args.toml, channels, name)
+                    caller_error, aligner_error, description = result.result()
+            else:
+                caller_error, aligner_error, description = _check_plugins(
+                    args.toml, channels, name
+                )
+            if caller_error is not None:
                 logger.error(f"Caller{label} could not be initialised.")
                 logger.error(
                     "Possible reasons for this include a mismatch between the ont basecaller client and the version dorado you are connecting to."
@@ -91,29 +133,26 @@ def run(parser, args, extras) -> int:
                     "Additional information is available here: https://looselab.github.io/readfish/FAQ.html#connection-error-bad-reply-could-not-interpret-message-from-server-for-request-load-config-reply-invalid-protocol"
                 )
                 logger.error("See below for further details on this specific error.")
-                logger.error(str(exc))
+                logger.error(caller_error)
                 errors += 1
             else:
                 logger.info(f"Caller{label} initialised")
-
-            logger.info(f"Initialising Aligner{label}")
-            try:
-                aligners[name] = mapper_settings.load_object("Aligner")
-            except Exception as exc:
+            if aligner_error is not None:
                 logger.error(
                     f"Aligner{label} could not be initialised, see below for details"
                 )
-                logger.error(str(exc))
+                logger.error(aligner_error)
                 errors += 1
             else:
                 logger.info(f"Aligner{label} initialised")
+                descriptions.append(description)
 
         if args.no_describe:
             logger.info("Skipping descriptions of Config and Plugins.")
         elif not errors:
             logger.info(conf.describe_experiment())
-            for al in aligners.values():
-                logger.info(al.describe(conf.regions, conf.barcodes))
+            for description in descriptions:
+                logger.info(description)
         else:
             logger.info("Skipping descriptions due to errors.")
 
